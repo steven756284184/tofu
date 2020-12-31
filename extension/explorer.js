@@ -111,11 +111,13 @@ class Panel {
             status: Status,
             interest: Interest,
             review: Review,
+            annotation: Annotation,
             note: Note,
             photo: PhotoAlbum,
             follow: Follow,
             doumail: DoumailContact,
             doulist: Doulist,
+            board: Board,
         };
         let name = tab.getAttribute('name');
         let panel = new (PANEL_CLASSES[name])(tab, page, pageSize);
@@ -688,6 +690,113 @@ class Note extends Panel {
     }
 }
 
+const TEMPLATE_ANNOTATION = `\
+<article class="media subject">
+  <figure class="media-left">
+    <p class="image subject-cover">
+      <a class="subject-url" target="_blank" title="前往豆瓣查看"><img></a>
+    </p>
+  </figure>
+  <div class="media-content">
+    <div class="content">
+      <p>
+        <a class="subject-url title is-size-5" target="_blank" title="前往豆瓣查看"></a>
+        <span class="rating">
+          <label><span class="rating-count"></span>人评价</label>
+          <label>豆瓣评分：<span class="rating-value is-size-4 has-text-danger"></span></label>
+        </span>
+      </p>
+      <p class="subtitle is-size-6"></p>
+    </div>
+    <div class="box content annotation">
+      <p>
+        <a class="annotation-title annotation-url is-size-5" target="_blank"></a>
+        <small>我的评分：<span class="my-rating is-size-5 has-text-danger"></span></small><br>
+        <small><span class="create-time"></span> 发布<span class="type-name"></span></small>
+        <span class="tag is-normal comments"></span>
+        <span class="tag is-normal reads"></span><br>
+        <small>章节：<span class="chapter"></span></small><br>
+        <small>页码：<span class="page"></span></small>
+      </p>
+      <p class="abstract"></p>
+    </div>
+  </div>
+</article>`;
+
+/**
+ * Class Annotation
+ */
+class Annotation extends Panel {
+    async showAnnotation(annotationId, version) {
+        let storage = this.storage;
+        storage.local.open();
+        let { annotation } = await storage.local.annotation.get({ id: annotationId });
+        storage.local.close();
+        let container = MinorModal.instance.modal.querySelector('.box');
+        container.innerHTML = '';
+        let $article = $(TEMPLATE_ARTICLE);
+        $article.find('.title').text(annotation.title);
+        $article.find('.content').html(annotation.fulltext);
+        $article.appendTo(container);
+        MinorModal.show();
+    }
+
+    async load(total) {
+        let storage = this.storage;
+        storage.local.open();
+        let versionInfo = await storage.local.table('version').get({
+            table: 'annotation',
+        });
+        if (!versionInfo) {
+            storage.local.close();
+            return 0;
+        }
+        let currentVersion = versionInfo.version;
+        let collection = await storage.local.annotation
+            .offset(this.pageSize * (this.page - 1)).limit(this.pageSize)
+            .reverse()
+            .toArray();
+        if (!total) {
+            total = await storage.local.annotation
+                .count();
+        }
+        storage.local.close();
+        for (let {id, version, annotation} of collection) {
+            let $annotation = $(TEMPLATE_ANNOTATION);
+            $annotation.find('.subject-cover img').attr('src', annotation.subject.pic.normal);
+            $annotation.find('.subject-url').attr('href', annotation.subject.url);
+            $annotation.find('.title').text(annotation.subject.title);
+            $annotation.find('.annotation-title').text(annotation.title).click(async event => {
+                event.preventDefault();
+                await this.showAnnotation(id, currentVersion);
+                return false;
+            });
+            $annotation.find('.annotation-url').attr('href', annotation.url);
+            $annotation.find('.subtitle').text(annotation.subject.card_subtitle);
+            if (annotation.subject.null_rating_reason) {
+                $annotation.find('.rating').text(annotation.subject.null_rating_reason);
+            } else {
+                $annotation.find('.rating-value').text(annotation.subject.rating.value.toFixed(1));
+                $annotation.find('.rating-count').text(annotation.subject.rating.count);
+            }
+            $annotation.find('.create-time').text(annotation.create_time);
+            if (annotation.rating) {
+                $annotation.find('.my-rating').text(annotation.rating.value);
+            } else {
+                $annotation.find('.my-rating').parent().addClass('is-hidden');
+            }
+            $annotation.find('.chapter').text(annotation.chapter);
+            $annotation.find('.page').text(annotation.page);
+            $annotation.find('.comments').text(annotation.comments_count + ' 回应');
+            $annotation.find('.reads').text(annotation.read_count + ' 阅读');
+            $annotation.find('.abstract').text(annotation.abstract);
+            version < currentVersion && $annotation.addClass('is-obsolete');
+            $annotation.appendTo(this.container);
+        }
+        return total;
+    }
+}
+
 
 const TEMPLATE_COLUMNS = '<div class="columns is-multiline"></div>';
 const TEMPLATE_ALBUM = `\
@@ -795,7 +904,7 @@ class Photo extends Panel {
         for (let { photo, version } of collection) {
             let $photo = $(TEMPLATE_PHOTO);
             $photo.find('.image img').attr('src', photo.cover).click(() => {
-                PictureModal.show(photo.cover.replace('/m/','/l/'));
+                PictureModal.show(photo.raw);
             });
             $photo.find('.description').text(photo.description);
             version < currentVersion && $photo.addClass('is-obsolete');
@@ -1259,6 +1368,55 @@ class DoulistItem extends Panel {
     }
 }
 
+const TEMPLATE_BOARD = `\
+<article class="media contact">
+  <figure class="media-left">
+    <p class="image is-48x48 avatar">
+      <a class="board-sender-url" target="_blank"><img></a>
+    </p>
+  </figure>
+  <div class="media-content">
+    <div class="content">
+      <p>
+        <a class="board-sender-url username" target="_blank"></a>
+        <br>
+        <span class="text"></span>
+      </p>
+    </div>
+    <div class="columns user-data"></div>
+  </div>
+  <div class="media-right">
+    <span class="time"></span>
+  </div>
+</article>`;
+
+/**
+ * Class Board
+ */
+class Board extends Panel {
+    async load(total) {
+        let storage = this.storage;
+        storage.local.open();
+        let collection = await storage.local.board
+            .reverse()
+            .offset(this.pageSize * (this.page - 1)).limit(this.pageSize)
+            .toArray();
+        if (!total) {
+            total = await storage.local.board.count();
+        }
+        storage.local.close();
+        for (let {id, message, sender, sendTime} of collection) {
+            let $message = $(TEMPLATE_BOARD);
+            $message.find('.avatar img').attr('src', sender.avatar);
+            $message.find('.username').text(sender.name);
+            $message.find('.text').text(message);
+            $message.find('.time').text(sendTime);
+            $message.appendTo(this.container);
+        }
+        return total;
+    }
+}
+
 
 /**
  * Class ExporModal
@@ -1407,6 +1565,34 @@ class Exporter {
         }
     }
 
+    async exportAnnotation(storage) {
+        let collection = storage.local.annotation
+            .reverse();
+        let data = [['书名', '章节', '页码', '链接', '创建时间', '我的评分', '内容']];
+        await collection.each(row => {
+            let {
+                subject,
+                chapter,
+                page,
+                url,
+                rating,
+                fulltext,
+                create_time
+            } = row.annotation;
+            data.push([
+                `《${subject.title}》`,
+                chapter,
+                page,
+                url,
+                create_time,
+                rating ? rating.value : '',
+                fulltext,
+            ]);
+        });
+        let worksheet = XLSX.utils.aoa_to_sheet(data);
+        XLSX.utils.book_append_sheet(this.workbook, worksheet, '笔记');
+    }
+
     async exportStatus(storage) {
         let formatStatus = (status) => {
             if (status.deleted) {
@@ -1458,64 +1644,86 @@ class Exporter {
     }
 
     async exportFollowing(storage) {
-        let collection = storage.local.following;
         let data = [['用户名', '用户ID', '链接', '所在地', '备注']];
-        await collection.each(row => {
-            let {
-                name,
-                uid,
-                url,
-                loc,
-                remark
-            } = row.user;
-            data.push([
-                name,
-                uid,
-                url,
-                loc ? loc.name : '',
-                remark,
-            ]);
+
+        let versionInfo = await storage.local.table('version').get({
+            table: 'following',
         });
+
+        if (versionInfo) {
+            let collection = storage.local.following.where({ version: versionInfo.version });
+            await collection.each(row => {
+                let {
+                    name,
+                    uid,
+                    url,
+                    loc,
+                    remark
+                } = row.user;
+                data.push([
+                    name,
+                    uid,
+                    url,
+                    loc ? loc.name : '',
+                    remark,
+                ]);
+            });    
+        }
+
         let worksheet = XLSX.utils.aoa_to_sheet(data);
         XLSX.utils.book_append_sheet(this.workbook, worksheet, '我关注的');
     }
 
     async exportFollower(storage) {
-        let collection = storage.local.follower;
         let data = [['用户名', '用户ID', '链接', '所在地']];
-        await collection.each(row => {
-            let {
-                name,
-                uid,
-                url,
-                loc
-            } = row.user;
-            data.push([
-                name,
-                uid,
-                url,
-                loc ? loc.name : '',
-            ]);
+
+        let versionInfo = await storage.local.table('version').get({
+            table: 'follower',
         });
+
+        if (versionInfo) {
+            let collection = storage.local.follower.where({ version: versionInfo.version });
+            await collection.each(row => {
+                let {
+                    name,
+                    uid,
+                    url,
+                    loc
+                } = row.user;
+                data.push([
+                    name,
+                    uid,
+                    url,
+                    loc ? loc.name : '',
+                ]);
+            });    
+        }
         let worksheet = XLSX.utils.aoa_to_sheet(data);
         XLSX.utils.book_append_sheet(this.workbook, worksheet, '关注我的');
     }
 
     async exportBlacklist(storage) {
-        let collection = storage.local.blacklist;
         let data = [['用户名', '用户ID', '链接']];
-        await collection.each(row => {
-            let {
-                name,
-                uid,
-                url
-            } = row.user;
-            data.push([
-                name,
-                uid,
-                url
-            ]);
+
+        let versionInfo = await storage.local.table('version').get({
+            table: 'blacklist',
         });
+
+        if (versionInfo) {
+            let collection = storage.local.blacklist.where({ version: versionInfo.version });
+            await collection.each(row => {
+                let {
+                    name,
+                    uid,
+                    url
+                } = row.user;
+                data.push([
+                    name,
+                    uid,
+                    url
+                ]);
+            });
+        }
         let worksheet = XLSX.utils.aoa_to_sheet(data);
         XLSX.utils.book_append_sheet(this.workbook, worksheet, '黑名单');
     }
@@ -1603,6 +1811,23 @@ class Exporter {
         }
     }
 
+    async exportBoard(storage) {
+        let data = [['留言用户', '用户主页', '留言时间', '消息']];
+        let messages = await storage.local.board
+            .reverse()
+            .toArray();
+        for (let {id, sender, sendTime, message} of messages) {
+            data.push([
+                sender.name,
+                sender.url,
+                sendTime,
+                message
+            ]);
+        }
+        let worksheet = XLSX.utils.aoa_to_sheet(data);
+        XLSX.utils.book_append_sheet(this.workbook, worksheet, '留言板');
+    }
+
     async export(items) {
         let storage = new Storage(this.userId);
         storage.local.open();
@@ -1613,6 +1838,9 @@ class Exporter {
                     break;
                 case 'Review':
                     await this.exportReview(storage);
+                    break;
+                case 'Annotation':
+                    await this.exportAnnotation(storage);
                     break;
                 case 'Status':
                     await this.exportStatus(storage);
@@ -1638,6 +1866,9 @@ class Exporter {
                 case 'Doulist':
                     await this.exportDoulist(storage);
                     break;
+                case 'Board':
+                    await this.exportBoard(storage);
+                    break;
             }
         }
         storage.local.close();
@@ -1650,7 +1881,73 @@ class Exporter {
 }
 
 
+/**
+ * Class MigrateModal
+ */
+class MigrateModal {
+    constructor(selector) {
+        this.element = document.querySelector(selector);
+    }
+
+    static init() {
+        let modal = new MigrateModal('#migrate-modal');
+
+        modal.element.querySelectorAll('.cancel').forEach(item => {
+            item.addEventListener('click', () => modal.close());
+        });
+        $('.button[name="migrate"]').click(() => modal.open());
+
+        modal.element.querySelector('.select-all').addEventListener('change', event => {
+            modal.element.querySelectorAll('input[name="task"]').forEach(item => {
+                if (!item.hasAttribute('disabled')) {
+                    item.checked = event.target.checked;
+                }
+            });
+        });
+
+        modal.element.querySelector('.button[name="migrate"]').addEventListener('click', async () => {
+            let localUserId = parseInt(location.search.substr(1));
+            let job = await modal.createJob(localUserId);
+            if (job) {
+                modal.close();
+                window.open(chrome.extension.getURL('options.html#service'));
+            }
+        });
+
+        return modal;
+    }
+
+    async createJob(localUserId) {
+        let service = (await new Promise(resolve => {
+            chrome.runtime.getBackgroundPage(resolve);
+        })).service;
+        let checkedTasks = this.element.querySelectorAll('input[name="task"]:checked');
+        if (checkedTasks.length == 0) {
+            alert('请勾选要迁移的项目。');
+            return null;
+        }
+        let tasks = new Array(checkedTasks.length);
+        for (let i = 0; i < checkedTasks.length; i ++) {
+            tasks[i] = {
+                name: 'migrate/' + checkedTasks[i].value,
+            };
+        }
+        let job = await service.createJob(null, localUserId, tasks);
+        return job;
+    }
+
+    open() {
+        this.element.classList.add('is-active');
+    }
+
+    close() {
+        this.element.classList.remove('is-active');
+    }
+}
+
+
 let tab = TabPanel.render();
 tab.addEventListener('toggle', async event => await Panel.render(event.target.activeTab));
 Panel.render(tab.activeTab);
 ExportModal.init();
+MigrateModal.init();

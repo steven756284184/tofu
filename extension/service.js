@@ -9,6 +9,7 @@ import Storage from './storage.js';
 export const SERVICE_SETTINGS = {
     'service.debug': false,
     'service.requestInterval': 1000,
+    'service.cloudinary': '',
 };
 
 
@@ -111,12 +112,14 @@ class Job extends EventTarget {
     /**
      * Constructor
      * @param {Service} service 
-     * @param {string|null} userId 
+     * @param {string|null} targetUserId 
+     * @param {string|null} localUserId 
      */
-    constructor(service, userId) {
+    constructor(service, targetUserId, localUserId) {
         super();
         this._service = service;
-        this._userId = userId;
+        this._targetUserId = targetUserId;
+        this._localUserId = localUserId;
         this._tasks = [];
         this._isRunning = false;
         this._currentTask = null;
@@ -208,9 +211,9 @@ class Job extends EventTarget {
         let session = await this.checkin(fetch);
 
         let userId, account, targetUser, isOtherUser = false;
-        if (this._userId) {
-            let userInfo = await this.getUserInfo(fetch, session.cookies, this._userId);
-            this._userId = userId = parseInt(userInfo.id);
+        if (this._targetUserId) {
+            let userInfo = await this.getUserInfo(fetch, session.cookies, this._targetUserId);
+            this._targetUserId = userId = parseInt(userInfo.id);
             account = {
                 userId: userId,
                 username: userInfo.name,
@@ -228,7 +231,7 @@ class Job extends EventTarget {
             targetUser = session.userInfo;
         }
 
-        let storage = new Storage(userId);
+        let storage = new Storage(this._localUserId || userId);
         await storage.global.open();
         logger.debug('Open global database');
         await storage.global.account.put(account);
@@ -488,6 +491,9 @@ class StateChangeEvent extends Event {
  * Class Service
  */
 export default class Service extends EventTarget {
+    /**
+     * Constructor
+     */
     constructor() {
         super();
         Object.assign(this, {
@@ -502,6 +508,16 @@ export default class Service extends EventTarget {
         this._status = this.STATE_STOPPED;
         this.lastRequest = 0;
         chrome.runtime.onConnect.addListener(port => this.onConnect(port));
+    }
+
+    /**
+     * Load settings
+     */
+    async loadSettings() {
+        let settings = await Settings.load(SERVICE_SETTINGS);
+        Settings.apply(this, settings);
+        this.logger.debug('Service settings loaded.');
+        return this;
     }
 
     /**
@@ -675,15 +691,16 @@ export default class Service extends EventTarget {
 
     /**
      * Create a job
-     * @param  {string} userId 
+     * @param  {string} targetUserId 
+     * @param  {string} localUserId 
      * @param  {Array} tasks 
      */
-    async createJob(userId, tasks) {
+    async createJob(targetUserId, localUserId, tasks) {
         this.logger.debug('Creating a job...');
-        let job = new Job(this, userId);
+        let job = new Job(this, targetUserId, localUserId);
         for (let {name, args} of tasks) {
             try {
-                let module = await import(`./tasks/${name}.js`);
+                let module = await import(`./tasks/${name.toLowerCase()}.js`);
                 if (typeof args == 'undefined') {
                     args = [];
                 }
@@ -775,12 +792,8 @@ export default class Service extends EventTarget {
     static async startup() {
         const RUN_FOREVER = true;
 
-        let service = Service.instance;
+        let service = await Service.instance.loadSettings();
         let logger = service.logger;
-
-        let settings = await Settings.load(SERVICE_SETTINGS);
-        Settings.apply(service, settings);
-        logger.debug('Service settings loaded.');
 
         let browserMainVersion = (/Chrome\/([0-9]+)/.exec(navigator.userAgent)||[,0])[1];
         let extraOptions = (browserMainVersion >= 72) ? ['blocking', 'requestHeaders', 'extraHeaders'] : ['blocking', 'requestHeaders'];
@@ -795,22 +808,32 @@ export default class Service extends EventTarget {
             return {requestHeaders: details.requestHeaders};
         }, {urls: ['http://*.douban.com/*', 'https://*.douban.com/*']}, extraOptions);
         let lastRequest = 0;
-        let fetchURL = (resource, init) => {
+        let fetchURL = (resource, init, continuous = false, retries = 2) => {
             let promise = service.continue();
             let requestInterval = lastRequest + service.requestInterval - Date.now();
-            if (requestInterval > 0) {
+            if (!continuous && requestInterval > 0) {
                 promise = promise.then(() => {
                     return new Promise(resolve => {
                         setTimeout(resolve, requestInterval);
                     });
                 });
             }
-            promise = promise.then(() => {
+            let fetchResolve = () => {
                 let url = Request.prototype.isPrototypeOf(resource) ? resource.url : resource.toString();
                 lastRequest = Date.now();
                 logger.debug(`Fetching ${url}...`, resource);
-                return fetch(resource, init);
-            });
+                return fetch(resource, init).catch(e => {
+                    if (retries > 0) {
+                        logger.debug(e);
+                        logger.debug(`Attempt to fetch ${retries} times...`);
+                        retries --;
+                        return fetchResolve();
+                    } else {
+                        throw e;
+                    }
+                });
+            };
+            promise = promise.then(fetchResolve);
             service.dispatchEvent(new Event('progress'));
             return promise;
         };

@@ -30,6 +30,15 @@ const SCHEMA_LOCAL = [
         doumailContact: 'id, rank',
         version: 'table, version',
     },
+    {
+        files: '++id, &url',
+    },
+    {
+        annotation: 'id, subject, [subject+version]',
+    },
+    {
+        board: 'id',
+    },
 ];
 
 
